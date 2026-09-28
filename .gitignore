@@ -1,0 +1,12 @@
+/target/
+/dist/
+.env
+.env.*
+!.env.example
+*.log
+*.pem
+*.key
+credentials*.json
+private-fixtures/
+.DS_Store
+Thumbs.db
