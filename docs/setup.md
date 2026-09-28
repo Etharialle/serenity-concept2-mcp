@@ -63,6 +63,14 @@ Create a personal token through your [Concept2 Logbook account](https://log.conc
 
 Supply the token to the server through `CONCEPT2_ACCESS_TOKEN`. Use your MCP client's secret or environment configuration, or arrange for the client to inherit the variable when launched. Environment inheritance differs by client and operating system; a desktop app already running will not pick up a newly set shell variable. A shell-launched server waiting silently is normal: it expects MCP protocol messages on stdin.
 
+For a private Windows token file, create `%LOCALAPPDATA%\SerenityConcept2\access-token.txt` outside this repository and save only the token in it. Keep its permissions limited to your account and the normal Windows system administrators. Load it without printing it:
+
+```powershell
+$env:CONCEPT2_ACCESS_TOKEN = (Get-Content -Raw "$env:LOCALAPPDATA\SerenityConcept2\access-token.txt").Trim()
+```
+
+The server reads the environment variable; it does not automatically read this file.
+
 For a temporary PowerShell session, prompt without writing the token into shell history:
 
 ```powershell
@@ -118,7 +126,15 @@ Restart or reconnect the client. It should discover the five tools listed in the
 
 ## 4. Optional live acceptance
 
-Automated tests use synthetic data and do not establish real-account compatibility. To perform a private acceptance check:
+CI uses synthetic data and never reads a live account. A private stdio API check passed on 2026-09-28 using the Windows release executable. To repeat the opt-in check from a source checkout, use Python 3.10 or later and a token file outside the repository:
+
+```powershell
+python scripts/live_smoke.py --binary target/release/serenity-concept2-mcp.exe --token-file "$env:LOCALAPPDATA\SerenityConcept2\access-token.txt"
+```
+
+On macOS/Linux, pass the Unix executable path and your private token-file path. The checker launches the server, exercises all five tools, checks schemas and units, and independently reconciles summary totals when its reference data is complete. It reads at most two list pages for its independent reference. It prints fixed pass/fail/skip labels and counts; tokens and account records stay in memory, and no report is written. It skips unavailable stroke data or checks that cannot be established from the bounded sample. It does not configure a desktop client or compare against the Logbook UI.
+
+For manual desktop-client acceptance:
 
 1. Retrieve your profile and confirm the username while checking that email and birth date are absent.
 2. List a small date range containing known workouts. Follow a second page with a small `page_size` and confirm filters, IDs, and totals against the Logbook UI.

@@ -1,7 +1,7 @@
 # Serenity Concept2 MCP — Development Plan
 
 Date: 2026-09-28  
-Status: Rust implementation and public source repository created; native release verification in progress. Live-account acceptance remains pending a locally configured token.
+Status: Implemented in Rust, publicly available on GitHub, and verified against a live account. Native releases require passing CI.
 
 Architecture diagram: [PNG preview](docs/diagrams/serenity-concept2-architecture.png) · [Editable draw.io source](docs/diagrams/serenity-concept2-architecture.drawio).
 
@@ -32,7 +32,8 @@ The repository was initialized on `main` and published with separate planning an
 - Pinned Rust 1.96.0, `rmcp` 3.5.0 and the dependency lockfile. Tests cover mocked HTTP contracts, deterministic totals, output schemas, protocol cancellation, deadlines, and process behavior.
 - Added setup and tool guides, MIT and dependency notices, contributor/security guidance, native CI, and checksummed release packaging with extracted-binary smoke tests.
 - Native target matrix: Windows x64, Linux x64, macOS arm64 and macOS Intel. Release automation verifies every native target before publishing unsigned archives.
-- Pending acceptance: read the user's live profile/results/detail/strokes, compare a bounded summary with the Logbook UI, and verify an intended desktop client's configuration. Synthetic SDK and subprocess tests do not establish live-account compatibility.
+- Private live stdio checks passed on 2026-09-28: profile, multiple result pages, detail, available strokes, schema validation, and a bounded summary reconciled independently from list records. The token and all account responses remained outside committed files; responses were kept only in process memory.
+- Pending manual acceptance: compare selected records with the Logbook UI and verify the intended desktop client's configuration.
 - Deferred scope remains hosted OAuth, writes, optional crates.io publication, and an MCP Registry listing.
 
 ## 2. First-release scope
@@ -175,7 +176,7 @@ Before choosing an OAuth design, verify Concept2's behavior for state, PKCE, reg
 | 3 — Summaries | Deterministic aggregations, bounds, coverage metadata, documented calculation rules. | A known multi-page dataset yields exact expected totals; interrupted and capped queries disclose partial coverage. |
 | 4 — Public release | Setup guide, examples, license, contributor/security docs, CI, native archives/checksums, repository and release preparation. | Extracted executables pass smoke tests on each advertised OS/architecture; source builds work with the documented Rust toolchain; release contents contain only intended public files. |
 
-Milestones 1–3 are implemented and verified with synthetic data. Documentation and release automation are implemented for milestone 4. Milestone 0's private live check remains open and must be completed before claiming live-account acceptance.
+Milestones 1–3 are implemented and verified with synthetic data. Milestone 0's private live API check passed using the release executable, including a multi-page summary and independent daily/equipment reconciliation. Documentation and release automation are implemented for milestone 4; native CI gates artifact publication.
 
 ## 8. Verification plan
 
@@ -219,4 +220,4 @@ Remaining release and integration choices:
 - Consider signing/notarization for later releases; initial archives are documented as unsigned.
 - Revisit remote hosting or mutations only as separately scoped features.
 
-**Next acceptance step:** configure a personal token locally using `docs/setup.md`, then run the private read-only checks in section 8. Keep captured account data out of Git.
+**Next acceptance step:** follow `docs/setup.md` to configure the intended desktop client and compare selected results with the Logbook UI. The opt-in checker can repeat the private API checks without saving account data.
