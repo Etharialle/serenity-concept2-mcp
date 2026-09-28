@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/Etharialle/serenity-concept2-mcp/security/advisories/new
+    about: Never put tokens or private logbook data in a public issue.

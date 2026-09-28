@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            executable: serenity-concept2-mcp
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            executable: serenity-concept2-mcp.exe
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            executable: serenity-concept2-mcp
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            executable: serenity-concept2-mcp
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test release artifact verification
+        run: python -m unittest discover -s scripts -p 'test_*.py'
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+      - name: Verify native target and toolchain
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          rustc --version --verbose
+          rustc --version --verbose | grep -F "host: $EXPECTED_TARGET"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check lints
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Run synthetic unit and integration tests
+        run: cargo test --locked
+      - name: Build native executable
+        run: cargo build --release --locked
+      - name: Record Unix runtime library requirements
+        if: runner.os != 'Windows'
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            ldd "target/release/$EXECUTABLE"
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            otool -L "target/release/$EXECUTABLE"
+          fi
+      - name: Record Windows runtime library requirements
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dumpbin = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw 'Unable to locate MSVC dumpbin' }
+          & $dumpbin /dependents target/release/serenity-concept2-mcp.exe
+          if ($LASTEXITCODE -ne 0) { throw 'dumpbin failed' }
+      - name: Package, verify checksums, and smoke-test extracted executable
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          EXECUTABLE: ${{ matrix.executable }}
+        run: python scripts/package.py --binary "target/release/$EXECUTABLE" --target "$BUILD_TARGET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

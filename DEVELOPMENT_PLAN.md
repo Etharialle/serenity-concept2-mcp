@@ -1,7 +1,7 @@
 # Serenity Concept2 MCP — Development Plan
 
 Date: 2026-09-28  
-Status: Draft for review; implementation and publication have not started.
+Status: Rust implementation and public source repository created; native release verification in progress. Live-account acceptance remains pending a locally configured token.
 
 Architecture diagram: [PNG preview](docs/diagrams/serenity-concept2-architecture.png) · [Editable draw.io source](docs/diagrams/serenity-concept2-architecture.drawio).
 
@@ -14,17 +14,26 @@ Build an open-source MCP server that lets an assistant retrieve a user's Concept
 - Project and repository name: `serenity-concept2-mcp`.
 - Source will live in the user's public GitHub account.
 - Implementation language: Rust.
-- This deliverable is a development plan.
+- Implement the plan and publish traceable commits to GitHub (authorized 2026-09-28).
 
-**Recommended defaults, pending review**
+**Adopted implementation defaults**
 
-- Target repository: `Etharialle/serenity-concept2-mcp`, based on the connected GitHub account.
+- Public repository: [Etharialle/serenity-concept2-mcp](https://github.com/Etharialle/serenity-concept2-mcp).
 - First release: read-only, one account per local process, using stdio.
 - Stable Rust, Cargo, and the official Rust MCP SDK (`rmcp`).
 - MIT license for project code, with required dependency notices preserved.
 - Distribution through GitHub Releases as native executables; optional crates.io publication after release validation.
 
-The local folder was empty and was not a Git repository when inspected. The target GitHub repository lookup returned 404; check again before creating it. No credentials or real workout data are needed in the public repository.
+The repository was initialized on `main` and published with separate planning and implementation commits. All committed fixtures are synthetic. No credentials or real workout data are needed in the public repository.
+
+### Implementation status
+
+- Implemented all five read-only tools, typed normalization, bounded API requests, summary coverage, input validation, cancellation, and stdio transport.
+- Pinned Rust 1.96.0, `rmcp` 3.5.0 and the dependency lockfile. Tests cover mocked HTTP contracts, deterministic totals, output schemas, protocol cancellation, deadlines, and process behavior.
+- Added setup and tool guides, MIT and dependency notices, contributor/security guidance, native CI, and checksummed release packaging with extracted-binary smoke tests.
+- Native target matrix: Windows x64, Linux x64, macOS arm64 and macOS Intel. Release automation verifies every native target before publishing unsigned archives.
+- Pending acceptance: read the user's live profile/results/detail/strokes, compare a bounded summary with the Logbook UI, and verify an intended desktop client's configuration. Synthetic SDK and subprocess tests do not establish live-account compatibility.
+- Deferred scope remains hosted OAuth, writes, optional crates.io publication, and an MCP Registry listing.
 
 ## 2. First-release scope
 
@@ -34,7 +43,7 @@ The server should support questions such as:
 - “Explain the intervals in this workout.”
 - “Compare this month's rowing volume with last month's.”
 
-Proposed tools:
+Implemented tools:
 
 | Tool | Inputs | Result |
 | --- | --- | --- |
@@ -70,7 +79,7 @@ Use a single Cargo package with a thin executable and a library containing the s
 
 Rust is the selected language. Use the official `rmcp` SDK and its Tokio-based transport support for protocol handling. Native releases let users run the server without installing a Rust toolchain. [Official Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
 
-Proposed dependencies:
+Dependency choices:
 
 | Area | Choice |
 | --- | --- |
@@ -92,19 +101,20 @@ Proposed layout:
 src/
   main.rs
   lib.rs
-  cli.rs
   server.rs
   config.rs
-  auth/
-  concept2/
-  domain/
-  tools/
+  api.rs
+  domain.rs
+  transport.rs
 tests/
   fixtures/
-  common/
-    mod.rs
   api_contract.rs
-  mcp_stdio.rs
+  server_protocol.rs
+  transport_process.rs
+scripts/
+  smoke.py
+  package.py
+  licenses/
 docs/
   setup.md
   tool-reference.md
@@ -147,7 +157,7 @@ Before choosing an OAuth design, verify Concept2's behavior for state, PKCE, reg
 - Preserve source values alongside normalized fields where useful. Never infer a missing timezone or turn a missing measurement into zero.
 - Calculate volume by equipment. Keep mixed-equipment workouts separate unless their components can be attributed reliably.
 - Define the summary's date basis, work/rest treatment, and inclusion rules in `data-semantics.md`. Avoid averaging per-workout pace values; any aggregate pace must use compatible total distance and duration.
-- Start with a list default of 50 records. Summary requests use 250 records per page, with budgets of 20 pages, 5,000 records, and 30 seconds. These are proposed product limits to validate during the API spike.
+- Lists default to 50 records. Summaries use 250 records per page, with budgets of 20 pages, 5,000 records, and 30 seconds. HTTP responses are capped at 8 MiB, normalized result envelopes at 1 MiB, incoming MCP lines at 64 KiB, and workout details at 1,000 combined splits and intervals.
 - Fix the query's upper date bound before fetching and deduplicate records by workout ID across pages. Check for changing page metadata and flag detected inconsistencies. Until snapshot behavior is verified, disclose that `complete` means all reported pages were retrieved within budget; concurrent edits or deletions may still shift records during retrieval.
 - Stop at the first exhausted budget. Return `complete: false`, `records_included`, a reason, and enough context to retry a narrower range. Label partial totals as partial. A failed fetch must never become an empty successful summary.
 - Avoid per-workout detail requests when list data is sufficient. Fetch stroke data only when requested. Bound upstream response bytes as well as returned records; slicing a large response alone is insufficient.
@@ -165,7 +175,7 @@ Before choosing an OAuth design, verify Concept2's behavior for state, PKCE, reg
 | 3 — Summaries | Deterministic aggregations, bounds, coverage metadata, documented calculation rules. | A known multi-page dataset yields exact expected totals; interrupted and capped queries disclose partial coverage. |
 | 4 — Public release | Setup guide, examples, license, contributor/security docs, CI, native archives/checksums, repository and release preparation. | Extracted executables pass smoke tests on each advertised OS/architecture; source builds work with the documented Rust toolchain; release contents contain only intended public files. |
 
-The critical path is API validation → core reads → correct summaries → release. Documentation and CI can proceed alongside implementation. Estimate effort after milestone 0, when the unresolved integration details are known.
+Milestones 1–3 are implemented and verified with synthetic data. Documentation and release automation are implemented for milestone 4. Milestone 0's private live check remains open and must be completed before claiming live-account acceptance.
 
 ## 8. Verification plan
 
@@ -193,7 +203,7 @@ During implementation:
 
 Optional crates.io publication requires checking the crate name, package metadata, included files, and packaged-source installation first. Document `cargo install --locked` only after a crate release exists. Source builds remain available directly from the GitHub release tag.
 
-The public-release direction is confirmed. This planning task does not itself create a remote repository or publish a package.
+The user authorized repository creation, implementation, and GitHub publication on 2026-09-28. The public repository is created; release automation publishes native artifacts only after its validation jobs pass.
 
 ## 10. Later roadmap and open choices
 
@@ -203,11 +213,10 @@ The public-release direction is confirmed. This planning task does not itself cr
 
 **Optional hosted service:** add Streamable HTTP, user isolation, MCP authorization, Concept2 OAuth, deployment guidance, and operational ownership after choosing a hosting model.
 
-Choices for review:
+Remaining release and integration choices:
 
-- Is the first release local, or must it work with a remote-only client?
-- Should first-release scope include mutations? Recommendation: retain the read-only scope above.
-- Is MIT acceptable? It remains the proposed license.
-- Confirm the initial binary targets and signing approach before release.
+- Select the intended desktop client for live acceptance.
+- Consider signing/notarization for later releases; initial archives are documented as unsigned.
+- Revisit remote hosting or mutations only as separately scoped features.
 
-**Next implementation step:** milestone 0, followed by the Cargo scaffold and one complete profile-read path through the API client and MCP tool.
+**Next acceptance step:** configure a personal token locally using `docs/setup.md`, then run the private read-only checks in section 8. Keep captured account data out of Git.

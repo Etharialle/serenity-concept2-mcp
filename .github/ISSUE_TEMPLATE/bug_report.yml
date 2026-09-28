@@ -1,0 +1,31 @@
+name: Bug report
+description: Report a reproducible problem without sharing private logbook data.
+body:
+  - type: markdown
+    attributes:
+      value: Never include tokens, authorization headers, private workout records, or unredacted client logs. Report credential exposure privately using SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Server version, operating system, and MCP client
+      placeholder: v0.1.0; Windows 11 x64; client name and version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Use synthetic examples and redact identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized error message
+      description: Do not paste access tokens or personal response bodies.
