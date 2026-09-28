@@ -7,8 +7,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rmcp::{
     ServiceExt,
-    model::{CallToolRequestParams, CallToolResult},
-    service::{RoleClient, RunningService},
+    model::{CallToolRequestParams, CallToolResult, ClientRequest, Request},
+    service::{PeerRequestOptions, RoleClient, RunningService},
 };
 use serde_json::{Value, json};
 use serenity_concept2_mcp::{
@@ -29,6 +29,10 @@ enum Mode {
     Missing,
     Changed,
     Empty,
+    WrongId,
+    Oversized,
+    SlowFirst,
+    SlowSecond,
 }
 
 #[derive(Default)]
@@ -36,6 +40,15 @@ struct FakeApi {
     mode: Mode,
     calls: AtomicUsize,
     queries: Mutex<Vec<WorkoutQuery>>,
+    started: tokio::sync::Notify,
+    dropped: tokio::sync::Notify,
+}
+
+struct NotifyOnDrop<'a>(&'a tokio::sync::Notify);
+impl Drop for NotifyOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 fn workout(id: u64, equipment: &str, distance: u64, time: u64) -> Value {
@@ -53,6 +66,13 @@ impl LogbookApi for FakeApi {
     async fn workouts(&self, query: &WorkoutQuery) -> Result<WorkoutPage, ApiError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.queries.lock().unwrap().push(query.clone());
+        if matches!(self.mode, Mode::SlowFirst)
+            || (matches!(self.mode, Mode::SlowSecond) && query.page == 2)
+        {
+            let _guard = NotifyOnDrop(&self.dropped);
+            self.started.notify_one();
+            return std::future::pending().await;
+        }
         if matches!(self.mode, Mode::FailFirst)
             || (matches!(self.mode, Mode::FailSecond) && query.page == 2)
         {
@@ -109,11 +129,24 @@ impl LogbookApi for FakeApi {
         if matches!(self.mode, Mode::Missing) {
             return Err(ApiError::NotFound);
         }
-        Ok(workout(id, "rower", 1000, 6000))
+        let mut value = workout(
+            if matches!(self.mode, Mode::WrongId) {
+                id + 1
+            } else {
+                id
+            },
+            "rower",
+            1000,
+            6000,
+        );
+        if matches!(self.mode, Mode::Oversized) {
+            value["comments"] = Value::String("x".repeat(1024 * 1024));
+        }
+        Ok(value)
     }
     async fn strokes(&self, _: u64) -> Result<Value, ApiError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if matches!(self.mode, Mode::NoStrokes | Mode::Missing) {
+        if matches!(self.mode, Mode::NoStrokes | Mode::Missing | Mode::WrongId) {
             return Err(ApiError::NotFound);
         }
         Ok(json!([{"t":23,"d":155,"p":971,"spm":30,"hr":140},{"t":44,"d":299}]))
@@ -259,6 +292,7 @@ async fn pagination_changes_and_failures_are_explicitly_partial() {
         }
         if matches!(mode, Mode::Duplicate) {
             assert_eq!(value["data"]["coverage"]["duplicates_skipped"], 1);
+            assert_eq!(value["data"]["summary"]["duplicates_skipped"], 1);
             assert_eq!(value["data"]["summary"]["totals"]["distance_m"], 3000);
         }
         client.close().await.unwrap();
@@ -289,14 +323,14 @@ async fn first_page_failure_is_an_error_while_an_empty_logbook_is_complete() {
 
 #[tokio::test]
 async fn distinguish_missing_strokes_from_missing_workout() {
-    for mode in [Mode::NoStrokes, Mode::Missing] {
+    for mode in [Mode::NoStrokes, Mode::Missing, Mode::WrongId] {
         let mut client = connect(Arc::new(FakeApi {
             mode,
             ..Default::default()
         }))
         .await;
         let result = call(&client, "concept2_get_strokes", json!({"workout_id":1})).await;
-        if matches!(mode, Mode::Missing) {
+        if matches!(mode, Mode::Missing | Mode::WrongId) {
             assert_eq!(result.is_error, Some(true));
         } else {
             assert_eq!(
@@ -306,6 +340,91 @@ async fn distinguish_missing_strokes_from_missing_workout() {
         }
         client.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn oversized_details_return_a_small_tool_error() {
+    let mut client = connect(Arc::new(FakeApi {
+        mode: Mode::Oversized,
+        ..Default::default()
+    }))
+    .await;
+    let result = call(&client, "concept2_get_workout", json!({"workout_id":1})).await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(result.structured_content.is_none());
+    let serialized = serde_json::to_string(&result).unwrap();
+    assert!(serialized.contains("response_too_large"));
+    assert!(serialized.len() < 1024);
+    client.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn summary_deadline_distinguishes_no_data_from_partial_data() {
+    for mode in [Mode::SlowFirst, Mode::SlowSecond] {
+        let mut client = connect(Arc::new(FakeApi {
+            mode,
+            ..Default::default()
+        }))
+        .await;
+        let result = timeout(
+            Duration::from_secs(40),
+            client.call_tool(
+                CallToolRequestParams::new("concept2_summarize_workouts")
+                    .with_arguments(summary_params().as_object().unwrap().clone()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if matches!(mode, Mode::SlowFirst) {
+            assert_eq!(result.is_error, Some(true));
+            assert!(result.structured_content.is_none());
+        } else {
+            let value = result.structured_content.unwrap();
+            assert_eq!(value["data"]["coverage"]["complete"], false);
+            assert_eq!(value["data"]["coverage"]["reason"], "time_budget_exhausted");
+            assert_eq!(value["data"]["coverage"]["pages_fetched"], 1);
+            assert_eq!(value["data"]["summary"]["totals"]["distance_m"], 3000);
+        }
+        client.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn protocol_cancellation_drops_in_flight_api_work() {
+    let api = Arc::new(FakeApi {
+        mode: Mode::SlowFirst,
+        ..Default::default()
+    });
+    let mut client = connect(api.clone()).await;
+    let handle = client
+        .send_request_with_option(
+            ClientRequest::CallToolRequest(Request::new(
+                CallToolRequestParams::new("concept2_summarize_workouts")
+                    .with_arguments(summary_params().as_object().unwrap().clone()),
+            )),
+            PeerRequestOptions::default(),
+        )
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), api.started.notified())
+        .await
+        .unwrap();
+    handle
+        .cancel(Some("Synthetic cancellation test".into()))
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), api.dropped.notified())
+        .await
+        .unwrap();
+    // The same connection remains usable after cancelling an individual request.
+    assert_eq!(
+        call(&client, "concept2_get_profile", json!({}))
+            .await
+            .is_error,
+        Some(false)
+    );
+    client.close().await.unwrap();
 }
 
 #[tokio::test]

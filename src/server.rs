@@ -37,12 +37,31 @@ pub struct Response<T> {
     pub warnings: Vec<String>,
 }
 
-fn response<T>(data: T, warnings: Vec<String>) -> Json<Response<T>> {
-    Json(Response {
+fn response<T: Serialize>(data: T, warnings: Vec<String>) -> Result<Json<Response<T>>, String> {
+    let output = Response {
         fetched_at: Utc::now().to_rfc3339(),
         data,
         warnings,
-    })
+    };
+    // Count serialized bytes without retaining another copy of private data.
+    struct ByteBudget(usize);
+    impl std::io::Write for ByteBudget {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_sub(bytes.len())
+                .ok_or_else(|| std::io::Error::other("output limit"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(ByteBudget(1024 * 1024), &output).map_err(|_| {
+        "response_too_large: Tool output exceeds 1 MiB; request a smaller page or date range."
+            .to_string()
+    })?;
+    Ok(Json(output))
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -246,10 +265,10 @@ impl LogbookServer {
     ) -> Result<Json<Response<Profile>>, String> {
         cancellable(context, async {
             let raw = self.api.profile().await.map_err(api_error)?;
-            Ok(response(
+            response(
                 domain::normalize_profile(&raw).map_err(|e| e.to_string())?,
                 vec![],
-            ))
+            )
         })
         .await
     }
@@ -278,12 +297,12 @@ impl LogbookServer {
                 from: params.from.clone(), to: params.to.as_ref().map(|to| format!("{to} 23:59:59")),
                 equipment: params.equipment.clone(), page: params.page, page_size: params.page_size,
             }).await.map_err(api_error)?;
-            let workouts = page.data.iter().map(domain::normalize_workout).collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+            let workouts = page.data.iter().map(domain::normalize_workout_compact).collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
             if workouts.iter().any(|w| !matches_filter(w, params.from.as_deref(), params.to.as_deref(), params.equipment.as_deref())) {
                 return Err("invalid_response: Upstream returned records outside the requested filters.".into());
             }
             let next_page = (page.pagination.current_page < page.pagination.total_pages).then(|| page.pagination.current_page + 1);
-            Ok(response(WorkoutList { workouts, filters: params, total: page.pagination.total, total_pages: page.pagination.total_pages, next_page }, vec!["Pagination is not an atomic snapshot; concurrent logbook changes may shift records.".into()]))
+            response(WorkoutList { workouts, filters: params, total: page.pagination.total, total_pages: page.pagination.total_pages, next_page }, vec!["Pagination is not an atomic snapshot; concurrent logbook changes may shift records.".into()])
         }).await
     }
 
@@ -313,7 +332,7 @@ impl LogbookServer {
             if workout.id != params.workout_id {
                 return Err("invalid_response: Workout ID did not match the request.".into());
             }
-            Ok(response(workout, vec![]))
+            response(workout, vec![])
         })
         .await
     }
@@ -345,29 +364,37 @@ impl LogbookServer {
                     Ok(raw) => {
                         let window = domain::normalize_strokes(&raw, params.offset, params.limit)
                             .map_err(|e| e.to_string())?;
-                        Ok(response(
+                        response(
                             StrokeResult {
                                 workout_id: params.workout_id,
                                 available: true,
                                 window: Some(window),
                             },
                             vec![],
-                        ))
+                        )
                     }
                     Err(ApiError::NotFound) => {
                         // A 404 may mean either no strokes or no workout. Establish existence first.
-                        self.api
+                        let raw = self
+                            .api
                             .workout(params.workout_id)
                             .await
                             .map_err(api_error)?;
-                        Ok(response(
+                        let workout =
+                            domain::normalize_workout_compact(&raw).map_err(|e| e.to_string())?;
+                        if workout.id != params.workout_id {
+                            return Err(
+                                "invalid_response: Workout ID did not match the request.".into()
+                            );
+                        }
+                        response(
                             StrokeResult {
                                 workout_id: params.workout_id,
                                 available: false,
                                 window: None,
                             },
                             vec!["This workout has no available stroke data.".into()],
-                        ))
+                        )
                     }
                     Err(error) => Err(api_error(error)),
                 }
@@ -420,7 +447,14 @@ impl LogbookServer {
         let mut reported_pages = None;
         let mut consistent = true;
         let mut warnings = vec!["Dates use the workout's recorded local calendar; unknown timezones are not inferred.".into(), "Complete coverage means reported pages were retrieved, not an atomic snapshot of the logbook.".into()];
-        for page_number in 1..=SUMMARY_PAGES {
+        'pages: for page_number in 1..=SUMMARY_PAGES {
+            if Instant::now() >= deadline {
+                if coverage.pages_fetched == 0 {
+                    return Err("timeout: No summary page was retrieved within 30 seconds.".into());
+                }
+                coverage.reason = Some("time_budget_exhausted".into());
+                break;
+            }
             let query = WorkoutQuery {
                 from: Some(params.from.clone()),
                 to: Some(format!("{} 23:59:59", params.to)),
@@ -459,7 +493,11 @@ impl LogbookServer {
             coverage.reported_total.get_or_insert(page.pagination.total);
             reported_pages.get_or_insert(page.pagination.total_pages);
             for raw in &page.data {
-                let workout = domain::normalize_workout(raw).map_err(|e| e.to_string())?;
+                if Instant::now() >= deadline {
+                    coverage.reason = Some("time_budget_exhausted".into());
+                    break 'pages;
+                }
+                let workout = domain::normalize_workout_compact(raw).map_err(|e| e.to_string())?;
                 if !matches_filter(
                     &workout,
                     Some(&params.from),
@@ -480,6 +518,10 @@ impl LogbookServer {
                 if workouts.len() >= SUMMARY_RECORDS {
                     break;
                 }
+            }
+            if Instant::now() >= deadline {
+                coverage.reason = Some("time_budget_exhausted".into());
+                break;
             }
             if page.pagination.current_page != page_number {
                 coverage.reason = Some("unexpected_page_number".into());
@@ -516,9 +558,11 @@ impl LogbookServer {
                 "PARTIAL TOTALS: Narrow the date range or retry; inspect coverage.reason.".into(),
             );
         }
-        let summary = domain::summarize(&workouts, params.group_by).map_err(|e| e.to_string())?;
+        let mut summary =
+            domain::summarize(&workouts, params.group_by).map_err(|e| e.to_string())?;
+        summary.duplicates_skipped = coverage.duplicates_skipped;
         warnings.extend(summary.warnings.iter().cloned());
-        Ok(response(
+        response(
             SummaryResult {
                 filters: params,
                 date_basis: "recorded_local_workout_date".into(),
@@ -526,7 +570,7 @@ impl LogbookServer {
                 coverage,
             },
             warnings,
-        ))
+        )
     }
 }
 

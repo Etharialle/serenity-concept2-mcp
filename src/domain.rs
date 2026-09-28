@@ -18,6 +18,8 @@ pub enum DomainError {
     InvalidField(&'static str),
     #[error("The requested stroke window must contain between 1 and 1000 records")]
     InvalidWindow,
+    #[error("Workout details exceed the supported limit of 1000 splits and intervals combined")]
+    TooManySegments,
     #[error("Workout totals exceed the supported integer range")]
     Overflow,
     #[error("Conflicting records were returned for the same workout ID")]
@@ -332,6 +334,17 @@ fn segments(obj: &Object, field: &'static str) -> Result<Option<Vec<WorkoutSegme
 }
 
 pub fn normalize_workout(value: &Value) -> Result<Workout, DomainError> {
+    normalize_workout_inner(value, true)
+}
+
+/// Normalize list/summary measurements without materializing unused details.
+/// Comments, heart-rate objects, splits, intervals, and targets are omitted even
+/// when supplied. Their presence or shape does not affect core measurements.
+pub fn normalize_workout_compact(value: &Value) -> Result<Workout, DomainError> {
+    normalize_workout_inner(value, false)
+}
+
+fn normalize_workout_inner(value: &Value, include_details: bool) -> Result<Workout, DomainError> {
     let obj = object(data(value), "workout")?;
     let date = required_string(obj, "date")?;
     workout_date(&date)?;
@@ -342,11 +355,29 @@ pub fn normalize_workout(value: &Value) -> Result<Workout, DomainError> {
     let duration_tenths = required_u64(obj, "time")?;
     let rest_duration_tenths = optional_u64(obj, "rest_time")?;
     let empty = Object::new();
-    let details = match obj.get("workout") {
-        None | Some(Value::Null) => &empty,
-        Some(Value::Array(values)) if values.is_empty() => &empty,
-        Some(value) => object(value, "workout")?,
+    let details = if include_details {
+        match obj.get("workout") {
+            None | Some(Value::Null) => &empty,
+            Some(Value::Array(values)) if values.is_empty() => &empty,
+            Some(value) => object(value, "workout")?,
+        }
+    } else {
+        &empty
     };
+    // Bound expansion before allocating either normalized segment vector.
+    let mut remaining_segments = 1000;
+    for field in ["splits", "intervals"] {
+        if let Some(value) = details.get(field).filter(|value| !value.is_null()) {
+            let count = value
+                .as_array()
+                .ok_or(DomainError::InvalidField(field))?
+                .len();
+            if count > remaining_segments {
+                return Err(DomainError::TooManySegments);
+            }
+            remaining_segments -= count;
+        }
+    }
     Ok(Workout {
         id: positive_id(obj)?,
         date,
@@ -365,9 +396,17 @@ pub fn normalize_workout(value: &Value) -> Result<Workout, DomainError> {
         drag_factor: optional_u64(obj, "drag_factor")?,
         calories_total: optional_u64(obj, "calories_total")?,
         wattminutes_total: optional_u64(obj, "wattminutes_total")?,
-        heart_rate: heart_rate(obj)?,
+        heart_rate: if include_details {
+            heart_rate(obj)?
+        } else {
+            None
+        },
         source: optional_string(obj, "source")?,
-        comments_untrusted: optional_string(obj, "comments")?,
+        comments_untrusted: if include_details {
+            optional_string(obj, "comments")?
+        } else {
+            None
+        },
         splits: segments(details, "splits")?,
         intervals: segments(details, "intervals")?,
         targets: targets(details)?,
@@ -578,6 +617,88 @@ mod tests {
         assert_eq!(intervals[0].equipment.as_deref(), Some("rower"));
         assert_eq!(intervals[1].rest_duration_seconds, Some(60.0));
         assert!(workout.splits.is_none());
+    }
+
+    #[test]
+    fn compact_workouts_preserve_summary_values_without_materializing_details() {
+        let input = json!({
+            "id": 1, "date": "2026-09-28 08:09:10", "type": "rower",
+            "distance": 2000, "time": 4511, "rest_distance": 53, "rest_time": 601,
+            "timezone": "Europe/London", "date_utc": "2026-09-28 07:09:10",
+            "heart_rate": {"average": 145}, "comments": "Synthetic private detail",
+            "workout": {
+                "splits": [{"distance": 1000, "time": 2250}],
+                "intervals": [{"distance": 1000, "time": 2261, "rest_time": 601}],
+                "targets": {"pace": 1150}
+            }
+        });
+        let detailed = normalize_workout(&input).unwrap();
+        let compact = normalize_workout_compact(&input).unwrap();
+        assert!(compact.comments_untrusted.is_none());
+        assert!(compact.heart_rate.is_none());
+        assert!(compact.splits.is_none());
+        assert!(compact.intervals.is_none());
+        assert!(compact.targets.is_none());
+        assert_eq!(compact.timezone.as_deref(), Some("Europe/London"));
+        assert_eq!(compact.date_utc.as_deref(), Some("2026-09-28 07:09:10"));
+        assert_eq!(
+            summarize(&[compact], GroupBy::Day).unwrap(),
+            summarize(&[detailed], GroupBy::Day).unwrap()
+        );
+    }
+
+    #[test]
+    fn compact_workouts_ignore_malformed_unused_fields_but_validate_core_measurements() {
+        for (field, malformed) in [
+            ("comments", json!({"unexpected": "object"})),
+            ("heart_rate", json!("unexpected string")),
+            ("workout", json!("unexpected string")),
+            ("workout", json!({"splits": "unexpected string"})),
+            ("workout", json!({"intervals": [{"time": 50}]})),
+            ("workout", json!({"targets": []})),
+        ] {
+            let mut input = json!({"id": 1, "date": "2026-09-28", "type": "rower", "distance": 1000, "time": 2250});
+            input[field] = malformed;
+            assert!(normalize_workout(&input).is_err());
+            let compact = normalize_workout_compact(&input).unwrap();
+            assert_eq!(compact.distance_m, 1000);
+            assert_eq!(compact.duration_tenths, 2250);
+            input["time"] = Value::Null;
+            assert_eq!(
+                normalize_workout_compact(&input),
+                Err(DomainError::InvalidField("time"))
+            );
+        }
+    }
+
+    #[test]
+    fn detail_segment_limit_applies_to_combined_splits_and_intervals() {
+        for (split_count, interval_count, allowed) in [
+            (1000, 0, true),
+            (400, 600, true),
+            (1001, 0, false),
+            (0, 1001, false),
+            (400, 601, false),
+        ] {
+            let input = json!({
+                "id": 1, "date": "2026-09-28", "type": "rower", "distance": 1000, "time": 2250,
+                "workout": {
+                    "splits": vec![json!({"distance": 1, "time": 2}); split_count],
+                    "intervals": vec![json!({"distance": 1, "time": 2}); interval_count]
+                }
+            });
+            let result = normalize_workout(&input);
+            if allowed {
+                let workout = result.unwrap();
+                assert_eq!(workout.splits.unwrap().len(), split_count);
+                assert_eq!(workout.intervals.unwrap().len(), interval_count);
+            } else {
+                assert_eq!(result, Err(DomainError::TooManySegments));
+            }
+            let compact = normalize_workout_compact(&input).unwrap();
+            assert!(compact.splits.is_none());
+            assert!(compact.intervals.is_none());
+        }
     }
 
     #[test]
