@@ -32,7 +32,8 @@ jsonschema = { version = "0.58.2", default-features = false }
 rmcp = { version = "3.5.0", default-features = false, features = ["client", "transport-child-process"] }
 
 [profile.release]
-lto = "thin"
+# Thin LTO crashes the pinned compiler on the validated Windows build host.
+lto = false
 strip = "symbols"
 
 [lints.rust]

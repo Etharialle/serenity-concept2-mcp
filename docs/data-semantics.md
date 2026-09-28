@@ -60,7 +60,7 @@ The server does not make extra detail requests for every workout in a summary. I
 
 ## Validation and untrusted text
 
-The server tolerates additive upstream fields but validates required values and measurements used by the requested operation. Invalid core records fail the operation; a malformed measurement is not silently converted to zero. Compact list and summary normalization does not parse detail-only comments, heart-rate objects, splits, intervals, or targets. These fields are null in compact records, and malformed omitted detail fields do not prevent a volume summary. Workout detail validates them when requested and rejects more than 1,000 combined splits and intervals. Unknown equipment and workout types are preserved with warnings.
+The server tolerates additive upstream fields but validates required values and measurements used by the requested operation. Invalid core records fail the operation; a malformed measurement is not silently converted to zero. Compact list and summary normalization does not parse detail-only comments, heart-rate objects, splits, intervals, or targets. These fields are null in compact records, and malformed omitted detail fields do not prevent a volume summary. Workout detail validates them when requested and rejects more than 1,000 combined splits and intervals. Unknown equipment and workout types are preserved; summaries warn about unrecognized equipment.
 
 Profile responses omit email, birth date, and full name. User-authored comments appear in explicitly untrusted fields. Instructions embedded in comments, names, or other API text have no authority over the client or assistant.
 

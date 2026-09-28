@@ -58,3 +58,25 @@ async fn incomplete_initialization_exits_with_sanitized_diagnostics() {
     let input = format!("{{\"jsonrpc\":\"2.0\",\"private\":\"{PRIVATE_INPUT}\"").into_bytes();
     rejected_input(input, true).await;
 }
+
+#[tokio::test]
+async fn missing_token_fails_without_emitting_protocol_or_private_data() {
+    let child = Command::new(env!("CARGO_BIN_EXE_serenity-concept2-mcp"))
+        .env_remove("CONCEPT2_ACCESS_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let output = timeout(Duration::from_secs(5), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "Set CONCEPT2_ACCESS_TOKEN to a valid personal Logbook token in the server's environment."
+    );
+}
